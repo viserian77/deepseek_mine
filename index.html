@@ -941,4 +941,280 @@ async function send() {
   const text = inputEl.value.trim();
   if (!text) return;
   await doSend(text, false);
+}async function doSend(text, skipUserBubble) {
+  const key = getApiKey();
+  if (!key) return alert("请先配置 API Key");
+  if (!skipUserBubble) {
+    inputEl.value = "";
+    inputEl.style.height = "auto";
+    const parentUid = pendingBranchFrom;
+    pendingBranchFrom = null;
+    const um = { role: "user", content: text, uid: newUid() };
+    if (parentUid) um.parentUid = parentUid;
+    messages.push(um);
+    chatEl.appendChild(buildBlock(um));
+    if (emptyEl.parentNode === chatEl) emptyEl.style.display = "none";
+    scrollToBottom(true);
+    maybeAutoTitle();
+  }
+  sendBtn.disabled = true;
+  isStreaming = true;
+  updateStatUI(0);
+  const trimmed = [
+    { role: "system", content: "你是一个乐于助人的中文助手，回答简洁明了，使用 Markdown 格式。" },
+    ...messages.slice(-MAX_HISTORY).map(m => ({ role: m.role, content: m.content }))
+  ];
+  const model = useReasoner ? REASONER_MODEL : CHAT_MODEL;
+  const isReasoner = useReasoner;
+  let reasonBox = null;
+  if (isReasoner) {
+    if (emptyEl.parentNode === chatEl) emptyEl.style.display = "none";
+    const details = document.createElement("details");
+    details.className = "reason thinking";
+    details.open = true;
+    const s = document.createElement("summary");
+    s.textContent = "深度思考中";
+    const body = document.createElement("div");
+    body.className = "reason-body";
+    details.appendChild(s);
+    details.appendChild(body);
+    chatEl.appendChild(details);
+    reasonBox = {
+      el: details,
+      body: body,
+      summary: s,
+      finish() {
+        details.classList.remove("thinking");
+        this.summary.textContent = "思考过程";
+      }
+    };
+  }
+  const tempMsg = { role: "assistant", content: "", uid: newUid() };
+  const aiBlock = buildBlock(tempMsg);
+  const aiDiv = aiBlock.querySelector(".msg");
+  const actionsRow = aiBlock.querySelector(".actions");
+  actionsRow.style.display = "none";
+  aiDiv.innerHTML = '<span class="loading"><span></span><span></span><span></span></span>';
+  chatEl.appendChild(aiBlock);
+  scrollToBottom();
+  let fullText = "";
+  let reasonText = "";
+  let hasReasonContent = false;
+  let firstChunk = true;
+  let usage = null;
+  abortController = new AbortController();
+  try {
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + key
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: trimmed,
+        stream: true,
+        temperature: 1.0,
+        stream_options: { include_usage: true }
+      }),
+      signal: abortController.signal
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      aiDiv.classList.add("error");
+      aiDiv.textContent = "请求失败 (" + res.status + ")：\n" + errText;
+      if (reasonBox) reasonBox.el.remove();
+      isStreaming = false;
+      sendBtn.disabled = false;
+      return;
+    }
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const l = line.trim();
+        if (!l || !l.startsWith("data:")) continue;
+        const payload = l.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const json = JSON.parse(payload);
+          if (json.usage) usage = json.usage;
+          const deltaObj = json.choices?.[0]?.delta || {};
+          const rDelta = deltaObj.reasoning_content;
+          if (rDelta && reasonBox) {
+            hasReasonContent = true;
+            reasonText += rDelta;
+            reasonBox.body.textContent = reasonText;
+            reasonBox.body.scrollTop = reasonBox.body.scrollHeight;
+            scrollToBottom();
+          }
+          const delta = deltaObj.content;
+          if (delta) {
+            if (firstChunk) {
+              aiDiv.textContent = "";
+              aiDiv.classList.add("cursor");
+              firstChunk = false;
+            }
+            fullText += delta;
+            aiDiv.innerHTML = renderMarkdown(fullText) + '<span style="color:var(--primary)">_</span>';
+            scrollToBottom();
+          }
+        } catch (e) {}
+      }
+    }
+    aiDiv.classList.remove("cursor");
+    if (reasonBox) {
+      if (hasReasonContent) { reasonBox.finish(); reasonBox.el.open = false; }
+      else { reasonBox.el.remove(); reasonBox = null; }
+    }
+    let curTokens = 0, curCost = 0;
+    if (usage) {
+      curTokens = usage.total_tokens || 0;
+      curCost = calcCost(usage, model);
+      stat.totalTokens += curTokens;
+      stat.totalCost += curCost;
+      stat.reqCount += 1;
+      saveStat();
+      updateStatUI(curTokens);
+    } else {
+      curTokens = Math.round((text.length + fullText.length) * 0.6);
+      updateStatUI(curTokens);
+    }
+    if (fullText) {
+      const finalMsg = {
+        role: "assistant", content: fullText,
+        uid: tempMsg.uid,
+        chars: fullText.length,
+        tokens: curTokens,
+        cost: curCost
+      };
+      if (reasonText) finalMsg.reasoning = reasonText;
+      const lastUser = [...messages].reverse().find(m => m.role === "user");
+      if (lastUser) finalMsg.parentUid = lastUser.uid;
+      messages.push(finalMsg);
+      aiBlock.replaceWith(buildBlock(finalMsg));
+      saveMessagesForCur();
+    } else if (!hasReasonContent) {
+      aiDiv.textContent = "（无响应内容）";
+      actionsRow.style.display = "";
+    } else aiBlock.remove();
+  } catch (e) {
+    aiDiv.classList.remove("cursor");
+    if (reasonBox) reasonBox.el.remove();
+    if (e.name === "AbortError") {
+      if (fullText) {
+        const finalMsg = {
+          role: "assistant", content: fullText,
+          uid: tempMsg.uid,
+          chars: fullText.length, tokens: 0, cost: 0
+        };
+        if (reasonText) finalMsg.reasoning = reasonText;
+        messages.push(finalMsg);
+        aiBlock.replaceWith(buildBlock(finalMsg));
+        saveMessagesForCur();
+      } else aiBlock.remove();
+    } else {
+      aiDiv.classList.add("error");
+      aiDiv.textContent = "网络错误：" + e.message;
+      actionsRow.style.display = "";
+    }
+  } finally {
+    isStreaming = false;
+    sendBtn.disabled = false;
+    abortController = null;
+    scrollToBottom();
+  }
 }
+sendBtn.addEventListener("click", send);
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && window.innerWidth > 768) {
+    e.preventDefault(); send();
+  }
+});
+inputEl.addEventListener("input", () => {
+  inputEl.style.height = "auto";
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+});
+settingsBtn.addEventListener("click", () => {
+  const cur = localStorage.getItem("ds_key") || "";
+  const masked = cur ? cur.slice(0, 6) + "..." + cur.slice(-4) : "（未设置）";
+  const action = prompt("当前 API Key：" + masked + "\n\n输入新的 Key 以替换，或输入 del 删除：", "");
+  if (action === null) return;
+  const v = action.trim();
+  if (v === "del") { localStorage.removeItem("ds_key"); alert("已删除 API Key"); }
+  else if (v) { localStorage.setItem("ds_key", v); alert("已保存新 Key"); }
+});
+function refreshThinkBtn() {
+  if (useReasoner) { thinkBtn.classList.add("on"); thinkBtn.textContent = "思考中"; }
+  else { thinkBtn.classList.remove("on"); thinkBtn.textContent = "思考"; }
+}
+thinkBtn.addEventListener("click", () => {
+  useReasoner = !useReasoner;
+  localStorage.setItem(THINK_KEY, useReasoner ? "1" : "0");
+  refreshThinkBtn();
+});
+refreshThinkBtn();
+resetStatBtn.addEventListener("click", () => {
+  if (!confirm("确定要重置累计 token 和花费统计吗？")) return;
+  stat = { totalTokens: 0, totalCost: 0, reqCount: 0 };
+  saveStat(); updateStatUI(0);
+});
+function renderFav() {
+  favList.innerHTML = "";
+  if (!favorites.length) {
+    const d = document.createElement("div");
+    d.className = "favEmpty";
+    d.textContent = "还没有收藏内容";
+    favList.appendChild(d);
+    return;
+  }
+  [...favorites].reverse().forEach(f => {
+    const item = document.createElement("div");
+    item.className = "favItem";
+    const roleLabel = f.role === "user" ? "我" : "AI";
+    const r = document.createElement("div");
+    r.className = "role " + (f.role === "user" ? "" : "ai");
+    r.textContent = roleLabel;
+    const t = document.createElement("div");
+    t.className = "text";
+    t.textContent = f.content;
+    const ops = document.createElement("div");
+    ops.className = "ops";
+    const bCopy = document.createElement("button");
+    bCopy.textContent = "复制";
+    bCopy.onclick = () => copyText(f.content);
+    const bDel = document.createElement("button");
+    bDel.textContent = "删除";
+    bDel.onclick = () => {
+      if (!confirm("确定从收藏中删除？")) return;
+      favorites = favorites.filter(x => x.uid !== f.uid);
+      saveFav();
+      renderFav();
+      document.querySelectorAll('.actions[data-uid="' + f.uid + '"] .favStar')
+        .forEach(b => { b.textContent = "收藏"; b.classList.remove("starred"); });
+    };
+    ops.appendChild(bCopy);
+    ops.appendChild(bDel);
+    item.appendChild(r);
+    item.appendChild(t);
+    item.appendChild(ops);
+    favList.appendChild(item);
+  });
+}
+favBtn.addEventListener("click", () => { renderFav(); favPanel.classList.add("show"); });
+closeFav.addEventListener("click", () => favPanel.classList.remove("show"));
+favPanel.addEventListener("click", (e) => { if (e.target === favPanel) favPanel.classList.remove("show"); });
+loadSessions();
+updateStatUI(0);
+updateJumpBtn();
+inputEl.focus();
+</script>
+
+</body>
+</html>
