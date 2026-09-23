@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>DeepSeek 助手</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; overflow: hidden;
+  }
+  body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+  header {
+    background: #4d6bfe; color: #fff;
+    padding: 12px 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 16px; font-weight: 600;
+    box-shadow: 0 1px 4px rgba(0,0,0,.1);
+    z-index: 10;
+  }
+  header .title { flex: 1; text-align: center; }
+  header button {
+    background: rgba(255,255,255,.2); border: none;
+    color: #fff; padding: 6px 10px; border-radius: 8px;
+    font-size: 13px;
+  }
+  header button:active { background: rgba(255,255,255,.35); }
+
+  #chat {
+    flex: 1; overflow-y: auto;
+    padding: 12px; display: flex;
+    flex-direction: column; gap: 10px;
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .msg {
+    max-width: 84%; padding: 10px 14px;
+    border-radius: 16px; line-height: 1.55;
+    font-size: 15px; white-space: pre-wrap;
+    word-break: break-word;
+    animation: fadeIn .2s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .user {
+    align-self: flex-end;
+    background: #4d6bfe; color: #fff;
+    border-bottom-right-radius: 5px;
+  }
+  .ai {
+    align-self: flex-start;
+    background: #fff; color: #222;
+    border-bottom-left-radius: 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  .ai.error { background: #ffe9e9; color: #c33; }
+
+  /* 打字机光标 */
+  .cursor::after {
+    content: "▋"; color: #4d6bfe;
+    animation: blink .8s steps(2) infinite;
+    margin-left: 2px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .empty {
+    text-align: center; color: #999;
+    margin: auto; font-size: 14px; line-height: 1.8;
+  }
+  .empty b { color: #4d6bfe; display: block; font-size: 18px; margin-bottom: 8px; }
+
+  .input-area {
+    display: flex; padding: 8px 10px;
+    background: #fff; gap: 8px;
+    border-top: 1px solid #eee;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+  #input {
+    flex: 1; padding: 10px 14px;
+    border: 1px solid #e0e0e0;
+    border-radius: 22px; font-size: 15px;
+    outline: none; background: #f7f8fa;
+    resize: none; max-height: 120px;
+    font-family: inherit;
+  }
+  #input:focus { border-color: #4d6bfe; background: #fff; }
+  #send {
+    padding: 0 18px; border: none;
+    background: #4d6bfe; color: #fff;
+    border-radius: 22px; font-size: 15px;
+    font-weight: 600; min-width: 64px;
+  }
+  #send:active { transform: scale(.96); }
+  #send:disabled { opacity: .4; }
+
+  /* 加载三点 */
+  .loading { display: inline-flex; gap: 4px; align-items: center; height: 20px; }
+  .loading span {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #4d6bfe; animation: bounce 1.2s infinite;
+  }
+  .loading span:nth-child(2) { animation-delay: .15s; }
+  .loading span:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: .4; }
+    30% { transform: translateY(-5px); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <button id="newChat" title="新对话">＋ 新对话</button>
+  <div class="title">DeepSeek 助手</div>
+  <button id="settings" title="设置">⚙️</button>
+</header>
+
+<div id="chat">
+  <div class="empty" id="empty">
+    <b>👋 你好</b>
+    有什么可以帮你的吗？
+  </div>
+</div>
+
+<div class="input-area">
+  <textarea id="input" rows="1" placeholder="输入消息..." autocomplete="off"></textarea>
+  <button id="send">发送</button>
+</div>
+
+<script>
+/* ============================================================
+   配置区
+   ============================================================ */
+const API_URL  = "https://api.deepseek.com/chat/completions";
+const MODEL    = "deepseek-chat";       // 可选: deepseek-reasoner
+const MAX_HISTORY = 20;                 // 最多保留多少轮对话
+const STORE_KEY = "ds_history_v1";      // localStorage 键名
+
+/* ============================================================
+   状态
+   ============================================================ */
+let messages = [];        // {role, content}[]
+let isStreaming = false;
+let abortController = null;
+
+/* ============================================================
+   DOM
+   ============================================================ */
+const chatEl   = document.getElementById("chat");
+const inputEl  = document.getElementById("input");
+const sendBtn  = document.getElementById("send");
+const emptyEl  = document.getElementById("empty");
+const newChatBtn = document.getElementById("newChat");
+const settingsBtn = document.getElementById("settings");
+
+/* ============================================================
+   API Key 管理
+   ============================================================ */
+function getApiKey() {
+  let key = localStorage.getItem("ds_key");
+  if (!key) {
+    key = prompt("请输入你的 DeepSeek API Key（sk-...）\n\n可前往 platform.deepseek.com 获取");
+    if (key) {
+      key = key.trim();
+      localStorage.setItem("ds_key", key);
+    }
+  }
+  return key;
+}
+
+/* ============================================================
+   本地持久化
+   ============================================================ */
+function saveHistory() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(messages));
+  } catch (e) { /* 忽略超限 */ }
+}
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return;
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr) && arr.length) {
+      messages = arr;
+      renderAll();
+    }
+  } catch (e) { /* 忽略损坏数据 */ }
+}
+
+function clearHistory() {
+  messages = [];
+  localStorage.removeItem(STORE_KEY);
+  chatEl.innerHTML = "";
+  chatEl.appendChild(emptyEl);
+  emptyEl.style.display = "block";
+}
+
+/* ============================================================
+   渲染
+   ============================================================ */
+function renderAll() {
+  chatEl.innerHTML = "";
+  if (!messages.length) {
+    chatEl.appendChild(emptyEl);
+    emptyEl.style.display = "block";
+    return;
+  }
+  for (const m of messages) {
+    const div = document.createElement("div");
+    div.className = "msg " + (m.role === "user" ? "user" : "ai");
+    div.textContent = m.content;
+    chatEl.appendChild(div);
+  }
+  scrollToBottom();
+}
+
+function addBubble(text, cls) {
+  if (emptyEl.parentNode === chatEl) emptyEl.style.display = "none";
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = text;
+  chatEl.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function scrollToBottom() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+/* ============================================================
+   发送 & 流式接收
+   ============================================================ */
+async function send() {
+  if (isStreaming) return;
+  const text = inputEl.value.trim();
+  if (!text) return;
+
+  const key = getApiKey();
+  if (!key) return alert("请先配置 API Key");
+
+  inputEl.value = "";
+  inputEl.style.height = "auto";
+  sendBtn.disabled = true;
+  isStreaming = true;
+
+  // 用户消息入栈
+  const userMsg = { role: "user", content: text };
+  messages.push(userMsg);
+  addBubble(text, "user");
+
+  // 历史裁剪
+  const trimmed = [
+    { role: "system", content: "你是一个乐于助人的中文助手，回答简洁明了。" },
+    ...messages.slice(-MAX_HISTORY)
+  ];
+
+  // 创建一个"AI 气泡"，先显示加载动画
+  const aiDiv = addBubble("", "ai");
+  aiDiv.innerHTML = '<span class="loading"><span></span><span></span><span></span></span>';
+
+  let fullText = "";
+  let firstChunk = true;
+
+  abortController = new AbortController();
+
+  try {
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + key
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: trimmed,
+        stream: true,
+        temperature: 1.0
+      }),
+      signal: abortController.signal
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      aiDiv.classList.add("error");
+      aiDiv.textContent = `请求失败 (${res.status})：\n${errText}`;
+      isStreaming = false;
+      sendBtn.disabled = false;
+      return;
+    }
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // 按 SSE 事件切分
+      const lines = buffer.split("\n");
+      buffer = lines.pop();   // 最后一段可能不完整，留到下一轮
+
+      for (const line of lines) {
+        const l = line.trim();
+        if (!l || !l.startsWith("data:")) continue;
+        const payload = l.slice(5).trim();
+        if (payload === "[DONE]") continue;
+
+        try {
+          const json = JSON.parse(payload);
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) {
+            if (firstChunk) {
+              aiDiv.textContent = "";
+              aiDiv.classList.add("cursor");
+              firstChunk = false;
+            }
+            fullText += delta;
+            aiDiv.textContent = fullText;
+            scrollToBottom();
+          }
+          // reasoner 模型会有 reasoning_content，可忽略
+        } catch (e) {
+          // 忽略无法解析的单行
+        }
+      }
+    }
+
+    aiDiv.classList.remove("cursor");
+
+    if (fullText) {
+      messages.push({ role: "assistant", content: fullText });
+      saveHistory();
+    } else {
+      aiDiv.textContent = "（无响应内容）";
+    }
+  } catch (e) {
+    aiDiv.classList.remove("cursor");
+    if (e.name === "AbortError") {
+      aiDiv.textContent = fullText || "（已停止）";
+      if (fullText) {
+        messages.push({ role: "assistant", content: fullText });
+        saveHistory();
+      }
+    } else {
+      aiDiv.classList.add("error");
+      aiDiv.textContent = "网络错误：" + e.message;
+    }
+  } finally {
+    isStreaming = false;
+    sendBtn.disabled = false;
+    abortController = null;
+    scrollToBottom();
+  }
+}
+
+/* ============================================================
+   交互事件
+   ============================================================ */
+sendBtn.addEventListener("click", send);
+
+inputEl.addEventListener("keydown", (e) => {
+  // 手机上的 Enter 是换行；桌面上按 Enter 发送，Shift+Enter 换行
+  if (e.key === "Enter" && !e.shiftKey && window.innerWidth > 768) {
+    e.preventDefault();
+    send();
+  }
+});
+
+// 自动调整输入框高度
+inputEl.addEventListener("input", () => {
+  inputEl.style.height = "auto";
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+});
+
+// 新对话
+newChatBtn.addEventListener("click", () => {
+  if (isStreaming) {
+    if (!confirm("正在生成回复，确定要中断并开始新对话吗？")) return;
+    abortController?.abort();
+  }
+  if (messages.length && !confirm("确定要清空当前对话吗？")) return;
+  clearHistory();
+});
+
+// 设置
+settingsBtn.addEventListener("click", () => {
+  const cur = localStorage.getItem("ds_key") || "";
+  const masked = cur ? cur.slice(0, 6) + "..." + cur.slice(-4) : "（未设置）";
+  const action = prompt(
+    `当前 API Key：${masked}\n\n输入新的 Key 以替换，或输入 "del" 删除：`,
+    ""
+  );
+  if (action === null) return;
+  const v = action.trim();
+  if (v === "del") {
+    localStorage.removeItem("ds_key");
+    alert("已删除 API Key");
+  } else if (v) {
+    localStorage.setItem("ds_key", v);
+    alert("已保存新 Key");
+  }
+});
+
+/* ============================================================
+   初始化
+   ============================================================ */
+loadHistory();
+inputEl.focus();
+</script>
+
+</body>
+</html>
