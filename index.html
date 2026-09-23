@@ -1210,6 +1210,7 @@ function renderFav() {
 favBtn.addEventListener("click", () => { renderFav(); favPanel.classList.add("show"); });
 closeFav.addEventListener("click", () => favPanel.classList.remove("show"));
 favPanel.addEventListener("click", (e) => { if (e.target === favPanel) favPanel.classList.remove("show"); });
+  alert("Keys: " + Object.keys(localStorage).join(", "));
 loadSessions();
 updateStatUI(0);
 updateJumpBtn();
