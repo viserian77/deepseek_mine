@@ -718,4 +718,227 @@ newSessBtn.addEventListener("click", () => {
   createSession(false);
   renderSessList();
   closeSessPanel();
+});/* ============================================================
+   滚动 + 渲染
+   ============================================================ */
+function isAtBottom() {
+  return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 40;
+}
+function scrollToBottom(force) {
+  if (force) {
+    chatEl.scrollTop = chatEl.scrollHeight;
+    userScrolledUp = false;
+    updateJumpBtn();
+    return;
+  }
+  if (scrollMode === "off") return;
+  if (scrollMode === "on") {
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return;
+  }
+  if (!userScrolledUp && isAtBottom()) {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+}
+function refreshScrollBtn() {
+  scrollBtn.classList.remove("mode-on", "mode-off");
+  if (scrollMode === "auto") {
+    scrollBtn.textContent = "滚动";
+    scrollBtn.title = "智能滚动：点一下变总是滚";
+  } else if (scrollMode === "on") {
+    scrollBtn.textContent = "总滚";
+    scrollBtn.classList.add("mode-on");
+    scrollBtn.title = "总是自动滚：点一下变不滚";
+  } else {
+    scrollBtn.textContent = "锁定";
+    scrollBtn.classList.add("mode-off");
+    scrollBtn.title = "不自动滚：点一下恢复智能";
+  }
+}
+scrollBtn.addEventListener("click", () => {
+  if (scrollMode === "auto") scrollMode = "on";
+  else if (scrollMode === "on") scrollMode = "off";
+  else scrollMode = "auto";
+  localStorage.setItem(SCROLL_KEY, scrollMode);
+  refreshScrollBtn();
+  if (scrollMode === "on") scrollToBottom(true);
 });
+refreshScrollBtn();
+function updateJumpBtn() {
+  const hasUserMsg = messages.some(m => m.role === "user");
+  const notAtBottom = !isAtBottom();
+  if (hasUserMsg && notAtBottom) jumpPrevBtn.classList.add("show");
+  else jumpPrevBtn.classList.remove("show");
+}
+jumpPrevBtn.addEventListener("click", () => {
+  const blocks = chatEl.querySelectorAll(".block.user");
+  if (!blocks.length) return;
+  const curTop = chatEl.scrollTop;
+  let target = null;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    if (b.offsetTop < curTop - 20) { target = b; break; }
+  }
+  if (!target) target = blocks[0];
+  chatEl.scrollTo({ top: target.offsetTop - 8, behavior: "smooth" });
+  userScrolledUp = true;
+  setTimeout(updateJumpBtn, 400);
+});
+chatEl.addEventListener("scroll", () => {
+  if (scrollMode === "auto") {
+    if (isAtBottom()) userScrolledUp = false;
+    else userScrolledUp = true;
+  }
+  updateJumpBtn();
+});
+function buildBlock(m) {
+  const block = document.createElement("div");
+  block.className = "block " + (m.role === "user" ? "user" : "ai");
+  block.dataset.uid = m.uid || (m.uid = newUid());
+  const bubble = document.createElement("div");
+  bubble.className = "msg " + (m.role === "user" ? "user" : "ai");
+  if (m.role === "user") bubble.textContent = m.content;
+  else bubble.innerHTML = renderMarkdown(m.content);
+  block.appendChild(bubble);
+  if (m.role === "assistant" && m.tokens != null) {
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = (m.chars || 0) + " 字 · " + m.tokens + " tokens" + (m.cost ? " · 约￥" + m.cost.toFixed(4) : "");
+    block.appendChild(meta);
+  }
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  actions.dataset.uid = block.dataset.uid;
+  const btnCopy = document.createElement("button");
+  btnCopy.className = "actBtn"; btnCopy.textContent = "复制";
+  btnCopy.onclick = () => copyText(m.content);
+  actions.appendChild(btnCopy);
+  const btnFav = document.createElement("button");
+  btnFav.className = "actBtn favStar" + (isFaved(m.uid) ? " starred" : "");
+  btnFav.textContent = isFaved(m.uid) ? "已收藏" : "收藏";
+  btnFav.onclick = () => toggleFav(m.uid, m.role, m.content);
+  actions.appendChild(btnFav);
+  if (m.role === "user") {
+    const btnEdit = document.createElement("button");
+    btnEdit.className = "actBtn"; btnEdit.textContent = "修改";
+    btnEdit.onclick = () => editMessage(m.uid);
+    actions.appendChild(btnEdit);
+    const btnDel = document.createElement("button");
+    btnDel.className = "actBtn"; btnDel.textContent = "删除";
+    btnDel.onclick = () => deleteMessage(m.uid);
+    actions.appendChild(btnDel);
+  }
+  if (m.role === "assistant") {
+    const btnRegen = document.createElement("button");
+    btnRegen.className = "actBtn"; btnRegen.textContent = "重生成";
+    btnRegen.onclick = () => regenerate(m.uid);
+    actions.appendChild(btnRegen);
+    const btnDel = document.createElement("button");
+    btnDel.className = "actBtn"; btnDel.textContent = "删除";
+    btnDel.onclick = () => deleteMessage(m.uid);
+    actions.appendChild(btnDel);
+  }
+  block.appendChild(actions);
+  return block;
+}
+function renderAll() {
+  chatEl.innerHTML = "";
+  if (!messages.length) {
+    chatEl.appendChild(emptyEl);
+    emptyEl.style.display = "block";
+    return;
+  }
+  for (const m of messages) {
+    if (m.role === "system") continue;
+    if (m.role === "assistant" && m.reasoning) {
+      const r = document.createElement("details");
+      r.className = "reason";
+      const s = document.createElement("summary");
+      s.textContent = "思考过程";
+      const body = document.createElement("div");
+      body.className = "reason-body";
+      body.textContent = m.reasoning;
+      r.appendChild(s);
+      r.appendChild(body);
+      chatEl.appendChild(r);
+    }
+    chatEl.appendChild(buildBlock(m));
+  }
+  scrollToBottom(true);
+}
+function askBranchChoice() {
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.className = "branchChoice";
+    const box = document.createElement("div");
+    box.className = "box";
+    const h4 = document.createElement("h4");
+    h4.textContent = "修改这条消息";
+    const p = document.createElement("p");
+    p.textContent = "选择处理方式：";
+    const b1 = document.createElement("button");
+    b1.className = "b1"; b1.textContent = "覆盖后续对话（省 token）";
+    const b2 = document.createElement("button");
+    b2.className = "b2"; b2.textContent = "开新分支（保留原对话）";
+    const bc = document.createElement("button");
+    bc.className = "bcancel"; bc.textContent = "取消";
+    box.appendChild(h4); box.appendChild(p);
+    box.appendChild(b1); box.appendChild(b2); box.appendChild(bc);
+    wrap.appendChild(box);
+    document.body.appendChild(wrap);
+    b1.onclick = () => { wrap.remove(); resolve("overwrite"); };
+    b2.onclick = () => { wrap.remove(); resolve("branch"); };
+    bc.onclick = () => { wrap.remove(); resolve(null); };
+  });
+}
+let pendingBranchFrom = null;
+async function editMessage(uid) {
+  if (isStreaming) return alert("正在生成中，稍后再试");
+  const idx = messages.findIndex(m => m.uid === uid);
+  if (idx < 0) return;
+  const m = messages[idx];
+  const choice = await askBranchChoice();
+  if (!choice) return;
+  inputEl.value = m.content;
+  inputEl.focus();
+  inputEl.dispatchEvent(new Event("input"));
+  if (choice === "overwrite") messages = messages.slice(0, idx);
+  else { pendingBranchFrom = uid; toast("已进入分支模式，修改后发送将创建新分支"); }
+  saveMessagesForCur();
+  renderAll();
+}
+function deleteMessage(uid) {
+  if (isStreaming) return alert("正在生成中，稍后再试");
+  const idx = messages.findIndex(m => m.uid === uid);
+  if (idx < 0) return;
+  const m = messages[idx];
+  if (!confirm("确定删除这条消息吗？")) return;
+  if (m.role === "user") {
+    const next = messages[idx + 1];
+    if (next && next.role === "assistant") messages.splice(idx, 2);
+    else messages.splice(idx, 1);
+  } else messages.splice(idx, 1);
+  saveMessagesForCur();
+  renderAll();
+  toast("已删除");
+}
+async function regenerate(uid) {
+  if (isStreaming) return;
+  const idx = messages.findIndex(m => m.uid === uid);
+  if (idx < 0) return;
+  let userIdx = idx - 1;
+  while (userIdx >= 0 && messages[userIdx].role !== "user") userIdx--;
+  if (userIdx < 0) return alert("找不到对应的提问");
+  const userText = messages[userIdx].content;
+  if (!confirm("重新生成会再次消耗 token，确定吗？")) return;
+  messages = messages.slice(0, userIdx + 1);
+  saveMessagesForCur();
+  renderAll();
+  await doSend(userText, true);
+}
+async function send() {
+  if (isStreaming) return;
+  const text = inputEl.value.trim();
+  if (!text) return;
+  await doSend(text, false);
+}
