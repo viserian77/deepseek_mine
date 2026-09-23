@@ -568,4 +568,154 @@ function getApiKey() {
     if (key) { key = key.trim(); localStorage.setItem("ds_key", key); }
   }
   return key;
+}function saveFav() { try { localStorage.setItem(FAV_KEY, JSON.stringify(favorites)); } catch (e) {} }
+function isFaved(uid) { return favorites.some(f => f.uid === uid); }
+function toggleFav(uid, role, content) {
+  const idx = favorites.findIndex(f => f.uid === uid);
+  if (idx >= 0) { favorites.splice(idx, 1); toast("已取消收藏"); }
+  else { favorites.push({ uid, role, content, time: Date.now() }); toast("已收藏"); }
+  saveFav();
+  document.querySelectorAll('.actions[data-uid="' + uid + '"] .favStar')
+    .forEach(b => {
+      b.textContent = isFaved(uid) ? "已收藏" : "收藏";
+      b.classList.toggle("starred", isFaved(uid));
+    });
 }
+function loadSessions() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SESS_KEY));
+    if (raw && Array.isArray(raw.list)) {
+      sessions = raw.list;
+      curSessionId = raw.curId;
+    }
+  } catch (e) {}
+  if (!sessions.length) createSession(true);
+  else if (!sessions.find(s => s.id === curSessionId)) curSessionId = sessions[0].id;
+  loadMessagesForCur();
+}
+function saveSessions() {
+  try { localStorage.setItem(SESS_KEY, JSON.stringify({ list: sessions, curId: curSessionId })); } catch (e) {}
+}
+function saveMessagesForCur() {
+  if (!curSessionId) return;
+  try { localStorage.setItem(MSG_PREFIX + curSessionId, JSON.stringify(messages)); } catch (e) {}
+}
+function loadMessagesForCur() {
+  messages = [];
+  if (!curSessionId) return;
+  try {
+    const raw = localStorage.getItem(MSG_PREFIX + curSessionId);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        arr.forEach(m => { if (!m.uid) m.uid = newUid(); });
+        messages = arr;
+      }
+    }
+  } catch (e) {}
+  renderAll();
+  updateSessTitleUI();
+}
+function createSession(silent) {
+  const id = newSessId();
+  sessions.unshift({ id, title: "新对话", time: Date.now() });
+  curSessionId = id;
+  messages = [];
+  saveSessions();
+  saveMessagesForCur();
+  if (!silent) { renderAll(); updateSessTitleUI(); renderSessList(); }
+}
+function switchSession(id) {
+  if (isStreaming) {
+    if (!confirm("正在生成，切换会话会中断，确定吗？")) return;
+    abortController?.abort();
+  }
+  saveMessagesForCur();
+  curSessionId = id;
+  saveSessions();
+  loadMessagesForCur();
+  renderSessList();
+  closeSessPanel();
+}
+function deleteSession(id) {
+  if (!confirm("确定删除这个会话吗？")) return;
+  sessions = sessions.filter(s => s.id !== id);
+  try { localStorage.removeItem(MSG_PREFIX + id); } catch (e) {}
+  if (curSessionId === id) {
+    if (sessions.length) curSessionId = sessions[0].id;
+    else createSession(true);
+    loadMessagesForCur();
+  }
+  saveSessions();
+  renderSessList();
+}
+function renameSession(id) {
+  const s = sessions.find(x => x.id === id);
+  if (!s) return;
+  const newTitle = prompt("重命名会话：", s.title);
+  if (newTitle === null) return;
+  const t = newTitle.trim();
+  if (!t) return;
+  s.title = t.slice(0, 30);
+  saveSessions();
+  renderSessList();
+  if (id === curSessionId) updateSessTitleUI();
+}
+function updateSessTitleUI() {
+  const s = sessions.find(x => x.id === curSessionId);
+  sessTitleEl.textContent = s ? s.title : "DeepSeek 助手";
+}
+function maybeAutoTitle() {
+  const s = sessions.find(x => x.id === curSessionId);
+  if (!s) return;
+  if (s.title && s.title !== "新对话") return;
+  const firstUser = messages.find(m => m.role === "user");
+  if (!firstUser) return;
+  s.title = firstUser.content.slice(0, 20).replace(/\n/g, " ") + (firstUser.content.length > 20 ? "..." : "");
+  s.time = Date.now();
+  saveSessions();
+  updateSessTitleUI();
+}
+function renderSessList() {
+  sessList.innerHTML = "";
+  sessions.forEach(s => {
+    const item = document.createElement("div");
+    item.className = "sessItem" + (s.id === curSessionId ? " active" : "");
+    const time = new Date(s.time || Date.now());
+    const timeStr = (time.getMonth()+1) + "/" + time.getDate() + " " + String(time.getHours()).padStart(2,'0') + ":" + String(time.getMinutes()).padStart(2,'0');
+    const titleDiv = document.createElement("div");
+    titleDiv.className = "s-title";
+    titleDiv.textContent = s.title;
+    const timeDiv = document.createElement("div");
+    timeDiv.className = "s-time";
+    timeDiv.textContent = timeStr;
+    const btnRename = document.createElement("button");
+    btnRename.className = "s-op";
+    btnRename.textContent = "改名";
+    const btnDel = document.createElement("button");
+    btnDel.className = "s-op";
+    btnDel.textContent = "删除";
+    item.appendChild(titleDiv);
+    item.appendChild(timeDiv);
+    item.appendChild(btnRename);
+    item.appendChild(btnDel);
+    item.addEventListener("click", (e) => {
+      if (e.target === btnRename || e.target === btnDel) return;
+      switchSession(s.id);
+    });
+    btnRename.addEventListener("click", (e) => { e.stopPropagation(); renameSession(s.id); });
+    btnDel.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s.id); });
+    sessList.appendChild(item);
+  });
+}
+menuBtn.addEventListener("click", () => { renderSessList(); sessPanel.classList.add("show"); });
+function closeSessPanel() { sessPanel.classList.remove("show"); }
+closeSess.addEventListener("click", closeSessPanel);
+sessPanel.addEventListener("click", (e) => { if (e.target === sessPanel) closeSessPanel(); });
+newSessBtn.addEventListener("click", () => {
+  if (messages.length && !confirm("新建对话会关闭当前会话，确定吗？")) return;
+  saveMessagesForCur();
+  createSession(false);
+  renderSessList();
+  closeSessPanel();
+});
