@@ -375,24 +375,17 @@ header button:active { opacity: .7; }
     background: none; border: none; color: var(--text-sub);
     font-size: 14px; padding: 2px 4px;
   }
-  #newSessBtn {
-    margin: 6px 8px 10px;
-    background: var(--primary); color: #fff;
-    border: none; padding: 10px;
-    border-radius: 10px; font-size: 14px; font-weight: 600;
-  }
-  #compressBtn {
+  .sessBtn {
     margin: 0 8px 10px;
-    background: #ff9800; color: #fff;
+    color: #fff;
     border: none; padding: 10px;
     border-radius: 10px; font-size: 14px; font-weight: 600;
+    display: block;
   }
-  #restoreBtn {
-    margin: 0 8px 10px;
-    background: #8bc34a; color: #fff;
-    border: none; padding: 10px;
-    border-radius: 10px; font-size: 14px; font-weight: 600;
-  }
+  .sessBtn.blue { background: #2196f3; }
+  .sessBtn.orange { background: #ff9800; }
+  .sessBtn.green { background: #8bc34a; }
+  .sessBtn.primary { background: var(--primary); margin-top: 6px; }
   .favItem {
     border-bottom: 1px solid var(--border-soft);
     padding: 10px 6px; font-size: 14px;
@@ -473,9 +466,10 @@ header button:active { opacity: .7; }
 <div class="overlay" id="sessPanel">
   <div class="sheet">
     <h3><span>会话列表</span><button id="closeSess">关闭</button></h3>
-    <button id="newSessBtn">新建对话</button>
-    <button id="compressBtn">压缩前文（省 token）</button>
-    <button id="restoreBtn">修复历史（找回旧对话）</button>
+    <button id="newSessBtn" class="sessBtn primary">新建对话</button>
+    <button id="compressBtn" class="sessBtn orange">压缩前文（省 token）</button>
+    <button id="restoreBackupBtn" class="sessBtn blue">恢复压缩前的对话</button>
+    <button id="restoreBtn" class="sessBtn green">修复历史（找回旧对话）</button>
     <div class="body" id="sessList"></div>
   </div>
 </div>
@@ -489,8 +483,7 @@ header button:active { opacity: .7; }
 
 <div id="toast"></div>
 
-<script>
-/* ============================================================
+<script>/* ============================================================
    基础配置
    ============================================================ */
 const API_URL  = "https://api.deepseek.com/chat/completions";
@@ -574,6 +567,7 @@ const sessList  = document.getElementById("sessList");
 const closeSess = document.getElementById("closeSess");
 const newSessBtn = document.getElementById("newSessBtn");
 const restoreBtn = document.getElementById("restoreBtn");
+const restoreBackupBtn = document.getElementById("restoreBackupBtn");
 const compressBtn = document.getElementById("compressBtn");
 const inputTokenHint = document.getElementById("inputTokenHint");
 const favPanel = document.getElementById("favPanel");
@@ -749,7 +743,7 @@ function renderSessList() {
     const timeStr = (time.getMonth()+1) + "/" + time.getDate() + " " + String(time.getHours()).padStart(2,'0') + ":" + String(time.getMinutes()).padStart(2,'0');
     const titleDiv = document.createElement("div");
     titleDiv.className = "s-title";
-    titleDiv.textContent = (s.locked ? "[锁] " : "") + s.title;
+    titleDiv.textContent = s.title;
     const timeDiv = document.createElement("div");
     timeDiv.className = "s-time";
     timeDiv.textContent = timeStr;
@@ -807,6 +801,54 @@ restoreBtn.addEventListener("click", () => {
   renderSessList();
   closeSessPanel();
   toast("已恢复 " + oldMsgs.length + " 条旧消息");
+});
+/* 恢复压缩前的对话 */
+restoreBackupBtn.addEventListener("click", () => {
+  if (isStreaming) return alert("正在生成中，稍后再试");
+  const prefix = "ds_backup_" + curSessionId + "_";
+  const backups = Object.keys(localStorage)
+    .filter(k => k.startsWith(prefix))
+    .sort()
+    .reverse();
+  if (!backups.length) {
+    return alert("没有找到这个会话的备份");
+  }
+  let msg = "找到 " + backups.length + " 个备份：\n\n";
+  backups.forEach((k, i) => {
+    const ts = parseInt(k.replace(prefix, ""));
+    const d = new Date(ts);
+    const t = (d.getMonth()+1) + "/" + d.getDate() + " " +
+              String(d.getHours()).padStart(2,'0') + ":" +
+              String(d.getMinutes()).padStart(2,'0') + ":" +
+              String(d.getSeconds()).padStart(2,'0');
+    let count = 0;
+    try { count = JSON.parse(localStorage.getItem(k)).length; } catch(e) {}
+    msg += "【" + (i+1) + "】" + t + "（" + count + " 条消息）\n";
+  });
+  msg += "\n输入序号恢复，或输入 0 取消：";
+  const pick = prompt(msg, "1");
+  if (pick === null) return;
+  const n = parseInt(pick);
+  if (isNaN(n) || n < 1 || n > backups.length) {
+    if (n !== 0) alert("序号无效");
+    return;
+  }
+  const chosenKey = backups[n - 1];
+  const raw = localStorage.getItem(chosenKey);
+  if (!raw) return alert("备份内容读不到");
+  if (!confirm("确定用这个备份替换当前对话吗？\n（当前的对话会被覆盖，建议先复制保存）")) return;
+  try {
+    const arr = JSON.parse(raw);
+    arr.forEach(m => { if (!m.uid) m.uid = newUid(); });
+    messages = arr;
+    saveMessagesForCur();
+    renderAll();
+    updateSessTitleUI();
+    closeSessPanel();
+    toast("已恢复 " + arr.length + " 条消息");
+  } catch (e) {
+    alert("恢复失败：" + e.message);
+  }
 });/* ============================================================
    滚动
    ============================================================ */
@@ -881,15 +923,6 @@ chatEl.addEventListener("scroll", () => {
 /* ============================================================
    渲染
    ============================================================ */
-function isLockedUpTo(uid) {
-  // 找到 uid 在 messages 里的索引，判断它是否在“锁定线”之上
-  const lockIdx = messages.findIndex(m => m.lockMarker);
-  if (lockIdx < 0) return false;
-  const idx = messages.findIndex(m => m.uid === uid);
-  if (idx < 0) return false;
-  return idx <= lockIdx;
-}
-
 function buildBlock(m) {
   const block = document.createElement("div");
   block.className = "block " + (m.role === "user" ? "user" : "ai");
@@ -952,7 +985,6 @@ function buildBlock(m) {
   block.appendChild(actions);
   return block;
 }
-
 function renderAll() {
   chatEl.innerHTML = "";
   if (!messages.length) {
@@ -978,45 +1010,34 @@ function renderAll() {
   }
   scrollToBottom(true);
 }
-
-/* 锁定前情：把这条消息及其以上全部标记为 locked */
 function toggleLock(uid) {
   const idx = messages.findIndex(m => m.uid === uid);
   if (idx < 0) return;
   const m = messages[idx];
   if (m.locked) {
-    // 解锁全部
     messages.forEach(x => { delete x.locked; delete x.lockMarker; });
     toast("已解锁全部前情");
   } else {
-    // 先清除旧标记
     messages.forEach(x => { delete x.locked; delete x.lockMarker; });
-    // 标记 [0..idx] 为 locked
     for (let i = 0; i <= idx; i++) messages[i].locked = true;
-    messages[idx].lockMarker = true;  // 用作分界标记
+    messages[idx].lockMarker = true;
     toast("已锁定 " + (idx+1) + " 条前情");
   }
   saveMessagesForCur();
   renderAll();
 }
-
 /* 压缩前文 */
 compressBtn.addEventListener("click", async () => {
   if (isStreaming) return alert("正在生成中，稍后再试");
   if (messages.length < 3) return alert("对话太短，不用压缩");
   const totalChars = messages.reduce((s, m) => s + m.content.length, 0);
   if (!confirm("将把当前 " + messages.length + " 条消息（约 " + totalChars + " 字）压缩成一段摘要，用于后续对话。\n\n原对话会被替换，但会先保存到「压缩备份」。确定继续吗？")) return;
-
-  // 备份原消息
   const backupKey = "ds_backup_" + curSessionId + "_" + Date.now();
   try { localStorage.setItem(backupKey, JSON.stringify(messages)); } catch (e) {}
-
   const key = getApiKey();
   if (!key) return;
-
   toast("正在压缩，请稍等...");
   const prompt = "请把下面这段小说的前情，压缩成 500 字以内的摘要，保留核心设定、人物关系、已发生的关键情节。直接输出摘要，不要客套话：\n\n" + messages.map(m => (m.role === "user" ? "【我】" : "【AI】") + m.content).join("\n\n");
-
   try {
     const res = await fetch(API_URL, {
       method: "POST",
@@ -1036,26 +1057,21 @@ compressBtn.addEventListener("click", async () => {
     }
     const data = await res.json();
     const summary = data.choices[0].message.content;
-
-    // 用摘要替换历史：一条 system 消息 + 保留摘要
     const newMsgs = [
       { role: "system", content: "以下是之前对话的摘要，请据此继续创作：\n\n" + summary, uid: newUid() },
       { role: "user", content: "[前情摘要已生成，请继续]", uid: newUid() }
     ];
-    // 如果之前有 locked 的前情，也保留（可选：这里不保留，因为已经进摘要了）
     messages = newMsgs;
     saveMessagesForCur();
     renderAll();
-    toast("已压缩，原对话备份在 localStorage: " + backupKey);
-    alert("压缩完成！\n\n原对话已备份，键名：" + backupKey + "\n\n如需恢复，手动改 localStorage 即可。");
+    updateSessTitleUI();
+    closeSessPanel();
+    alert("压缩完成！\n\n原对话已备份，如需恢复请点「恢复压缩前的对话」。");
   } catch (e) {
     alert("压缩出错：" + e.message);
   }
 });
-
-/* ============================================================
-   编辑 / 删除 / 重新生成
-   ============================================================ */
+/* 编辑 / 删除 / 重新生成 */
 function askBranchChoice() {
   return new Promise((resolve) => {
     const wrap = document.createElement("div");
@@ -1367,8 +1383,7 @@ resetStatBtn.addEventListener("click", () => {
   if (!confirm("确定要重置累计 token 和花费统计吗？")) return;
   stat = { totalTokens: 0, totalCost: 0, reqCount: 0 };
   saveStat(); updateStatUI(0);
-});
-function renderFav() {
+});function renderFav() {
   favList.innerHTML = "";
   if (!favorites.length) {
     const d = document.createElement("div");
